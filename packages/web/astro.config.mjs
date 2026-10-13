@@ -5,13 +5,22 @@ import sitemap from '@astrojs/sitemap';
 
 import tailwindcss from '@tailwindcss/vite';
 
+const sharedPageFiles = ['src/data/models.ts', 'src/lib/seo.ts'];
+
 /**
  * Files whose content ends up on a page, so <lastmod> only moves when the page does.
  * @param {string} pathname
  */
 function pageSources(pathname) {
-  const page = pathname === '/' ? 'src/pages/index.astro' : pathname === '/models' ? 'src/pages/models/index.astro' : `src/pages${pathname}.astro`
-  return [page, 'src/data/models.ts', 'src/lib/seo.ts']
+  /** @type {Record<string, string>} */
+  const pageMap = {
+    '/': 'src/pages/index.astro',
+    '/models': 'src/pages/models/index.astro',
+  };
+
+  const page = pageMap[pathname] ?? `src/pages${pathname}.astro`;
+
+  return [page, ...sharedPageFiles];
 }
 
 /**
@@ -20,9 +29,9 @@ function pageSources(pathname) {
  */
 function gitLastmod(files) {
   try {
-    return execFileSync('git', ['log', '-1', '--format=%cI', '--', ...files], { encoding: 'utf8' }).trim() || undefined
+    return execFileSync('git', ['log', '-1', '--format=%cI', '--', ...files], { encoding: 'utf8' }).trim() || undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
