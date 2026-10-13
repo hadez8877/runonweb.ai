@@ -78,6 +78,7 @@ function frame(children: Node[]) {
       flexDirection: 'column',
       width: 1200,
       height: 630,
+      boxSizing: 'border-box',
       padding: '56px 64px',
       background: BG,
       backgroundImage: `radial-gradient(900px 500px at 80% -10%, rgba(255,179,64,0.10), transparent 60%)`,
