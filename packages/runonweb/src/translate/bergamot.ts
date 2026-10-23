@@ -1,7 +1,6 @@
 import type { ProgressCallback } from '../core/index.ts'
 import { TRANSLATE_CACHE_NAME } from '../core/cache.ts'
 import { PAIRS, RUNTIME_CDN, type PairEntry } from './registry.ts'
-import { WORKER_SOURCE } from './worker.ts'
 
 /**
  * Default weights location: the runonweb mirror of Mozilla's Firefox Translations models on the
@@ -77,15 +76,47 @@ async function readWithProgress(
   const total = Number(res.headers.get('content-length') ?? 0)
   if (!res.body) return res.arrayBuffer()
   const reader = res.body.getReader()
+  if (total > 0) {
+    let out = new Uint8Array(total)
+    let loaded = 0
+    let lastEmit = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (loaded + value.byteLength > out.byteLength) {
+        const grown = new Uint8Array(Math.max(out.byteLength * 2, loaded + value.byteLength))
+        grown.set(out.subarray(0, loaded))
+        out = grown
+      }
+      out.set(value, loaded)
+      loaded += value.byteLength
+      const now = performance.now()
+      if (loaded >= total || now - lastEmit >= 32) {
+        lastEmit = now
+        onChunk(loaded, total)
+      }
+    }
+    const finalBytes = loaded === out.byteLength ? out : out.subarray(0, loaded)
+    return finalBytes.byteOffset === 0 && finalBytes.byteLength === finalBytes.buffer.byteLength
+      ? (finalBytes.buffer as ArrayBuffer)
+      : finalBytes.slice().buffer
+  }
+
   const chunks: Uint8Array[] = []
   let loaded = 0
+  let lastEmit = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
     chunks.push(value)
     loaded += value.byteLength
-    onChunk(loaded, total)
+    const now = performance.now()
+    if (now - lastEmit >= 32) {
+      lastEmit = now
+      onChunk(loaded, total)
+    }
   }
+  onChunk(loaded, total)
   const out = new Uint8Array(loaded)
   let offset = 0
   for (const c of chunks) {
@@ -98,8 +129,13 @@ async function readWithProgress(
 /**
  * Download one model file, through Cache Storage so the second load is instant and offline.
  */
-async function fetchFile(url: string, file: string, onProgress?: ProgressCallback): Promise<ArrayBuffer> {
-  const cache = await openCache()
+async function fetchFile(
+  url: string,
+  file: string,
+  onProgress: ProgressCallback | undefined,
+  cachePromise: Promise<Cache | null>
+): Promise<ArrayBuffer> {
+  const cache = await cachePromise
   const hit = await cache?.match(url)
   if (hit) {
     onProgress?.({ status: 'progress', file, progress: 100 })
@@ -120,16 +156,16 @@ async function fetchFile(url: string, file: string, onProgress?: ProgressCallbac
   })
 
   if (cache) {
-    try {
-      await cache.put(
+    void cache
+      .put(
         url,
         new Response(buffer, {
           headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(buffer.byteLength) },
         })
       )
-    } catch {
-      // Quota exceeded or private mode: keep going without a cache.
-    }
+      .catch(() => {
+        // Quota exceeded or private mode: keep going without a cache.
+      })
   }
   return buffer
 }
@@ -178,41 +214,42 @@ export class BergamotEngine {
       return Promise.reject(new Error('runonweb/translate needs a browser with Web Workers'))
     }
 
-    this.#workerUrl = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }))
-    const worker = new Worker(this.#workerUrl)
-    this.#worker = worker
-
-    worker.addEventListener('message', (event: MessageEvent) => {
-      const { id, result, error } = event.data as {
-        id: number
-        result?: unknown
-        error?: { name?: string; message?: string; stack?: string }
-      }
-      const pending = this.#pending.get(id)
-      if (!pending) return
-      this.#pending.delete(id)
-      if (error) {
-        const err = new Error(error.message ?? 'Worker error')
-        if (error.name) err.name = error.name
-        if (error.stack) err.stack = error.stack
-        pending.reject(err)
-      } else {
-        pending.resolve(result)
-      }
-    })
-    worker.addEventListener('error', (event: ErrorEvent) => {
-      const err = new Error(event.message || 'Translation worker crashed')
-      for (const p of this.#pending.values()) p.reject(err)
-      this.#pending.clear()
-    })
-
     this.#onProgress?.({ status: 'loading', progress: 0 })
-    this.#ready = this.#call<boolean>('init', { runtimePath: this.#runtimePath })
-      .then(() => undefined)
-      .catch((err) => {
-        this.#ready = null
-        throw err
+    this.#ready = (async () => {
+      const { WORKER_SOURCE } = await import('./worker.ts')
+      this.#workerUrl = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }))
+      const worker = new Worker(this.#workerUrl)
+      this.#worker = worker
+
+      worker.addEventListener('message', (event: MessageEvent) => {
+        const { id, result, error } = event.data as {
+          id: number
+          result?: unknown
+          error?: { name?: string; message?: string; stack?: string }
+        }
+        const pending = this.#pending.get(id)
+        if (!pending) return
+        this.#pending.delete(id)
+        if (error) {
+          const err = new Error(error.message ?? 'Worker error')
+          if (error.name) err.name = error.name
+          if (error.stack) err.stack = error.stack
+          pending.reject(err)
+        } else {
+          pending.resolve(result)
+        }
       })
+      worker.addEventListener('error', (event: ErrorEvent) => {
+        const err = new Error(event.message || 'Translation worker crashed')
+        for (const p of this.#pending.values()) p.reject(err)
+        this.#pending.clear()
+      })
+
+      await this.#call<boolean>('init', { runtimePath: this.#runtimePath })
+    })().catch((err) => {
+      this.#ready = null
+      throw err
+    })
     return this.#ready
   }
 
@@ -226,12 +263,17 @@ export class BergamotEngine {
     if (existing) return existing
 
     const promise = (async () => {
-      await this.init()
       const f = entry.files
       const vocabNames = f.vocab ? [f.vocab] : [f.srcvocab!, f.trgvocab!]
-      const [model, lex, ...vocabs] = await Promise.all(
-        [f.model, f.lex, ...vocabNames].map((name) => fetchFile(this.#fileUrl(entry, name), name, this.#onProgress))
-      )
+      const cachePromise = openCache()
+      const [, [model, lex, ...vocabs]] = await Promise.all([
+        this.init(),
+        Promise.all(
+          [f.model, f.lex, ...vocabNames].map((name) =>
+            fetchFile(this.#fileUrl(entry, name), name, this.#onProgress, cachePromise)
+          )
+        ),
+      ])
       this.#onProgress?.({ status: 'loading', file: key })
       await this.#call<boolean>('loadModel', { key, modelName: f.model, model, lex, vocabs }, [model, lex, ...vocabs])
     })()
@@ -249,7 +291,7 @@ export class BergamotEngine {
         `No Firefox Translations model for ${from} → ${to}. See PAIRS in 'runonweb/translate' for the supported pairs.`
       )
     }
-    for (const entry of route) await this.#loadEntry(entry)
+    await Promise.all(route.map((entry) => this.#loadEntry(entry)))
     this.#onProgress?.({ status: 'ready', progress: 100 })
     return route
   }

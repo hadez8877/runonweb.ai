@@ -1,5 +1,5 @@
 import type { Device, ProgressCallback, ResolvedDevice } from '../core/index.ts'
-import { resolveDevice, toProgressInfo } from '../core/index.ts'
+import { KOKORO_CACHE_NAME, resolveDevice, toProgressInfo } from '../core/index.ts'
 import { phonemizeLang } from './phonemes.ts'
 import { splitUtterances } from './split.ts'
 import { toFloat32 } from './wav.ts'
@@ -14,7 +14,7 @@ const DEFAULT_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX'
 const SAMPLE_RATE = 24_000
 const STYLE_DIM = 256
 const MAX_STYLE_INDEX = 509
-const VOICE_CACHE = 'runonweb-kokoro-voices'
+const VOICE_CACHE = KOKORO_CACHE_NAME
 
 type Tensorish = { data: Float32Array | number[]; dims: number[] }
 
@@ -37,10 +37,12 @@ export async function loadKokoro(options: {
   device?: Device
   onProgress?: ProgressCallback
 }): Promise<LoadedKokoro> {
-  const device = await resolveDevice(options.device ?? 'auto')
   options.onProgress?.({ status: 'loading', progress: 0 })
 
-  const { StyleTextToSpeech2Model, AutoTokenizer, env } = await import('@huggingface/transformers')
+  const [device, { StyleTextToSpeech2Model, AutoTokenizer, env }] = await Promise.all([
+    resolveDevice(options.device ?? 'auto'),
+    import('@huggingface/transformers'),
+  ])
   env.allowLocalModels = false
   const modelId = options.model ?? DEFAULT_MODEL
   const progress_callback = (data: Record<string, unknown>) => {
@@ -72,21 +74,41 @@ export async function* streamKokoro(
   voice: string,
   speed: number
 ): AsyncGenerator<SpeakChunk> {
+  const utterances = splitUtterances(text)
+  if (utterances.length === 0) return
+
   const lang = kokoroPhonemeLang(voice) ?? (voice.startsWith('b') ? 'en-gb' : 'en-us')
-  for (const piece of splitUtterances(text)) {
-    const phonemes = await phonemizeLang(piece, lang)
+  const stylesPromise = loadVoice(kokoro.modelId, voice)
+  const transformersPromise = import('@huggingface/transformers')
+
+  let nextPhonemesPromise: Promise<string> | null = phonemizeLang(utterances[0]!, lang)
+
+  for (let i = 0; i < utterances.length; i++) {
+    const piece = utterances[i]!
+    const currentPhonemesPromise = nextPhonemesPromise ?? phonemizeLang(piece, lang)
+    nextPhonemesPromise = i + 1 < utterances.length ? phonemizeLang(utterances[i + 1]!, lang) : null
+
+    const [phonemes, styles, { Tensor }] = await Promise.all([
+      currentPhonemesPromise,
+      stylesPromise,
+      transformersPromise,
+    ])
     if (!phonemes) throw new Error(`Could not phonemize text for ${lang}`)
-    const audio = await synthesize(kokoro, phonemes, voice, speed)
+    const audio = await synthesize(kokoro, phonemes, styles, speed, Tensor)
     yield { audio, samplingRate: SAMPLE_RATE, text: piece }
   }
 }
 
-async function synthesize(kokoro: LoadedKokoro, phonemes: string, voice: string, speed: number): Promise<Float32Array> {
-  const { Tensor } = await import('@huggingface/transformers')
+async function synthesize(
+  kokoro: LoadedKokoro,
+  phonemes: string,
+  styles: Float32Array,
+  speed: number,
+  Tensor: typeof import('@huggingface/transformers').Tensor
+): Promise<Float32Array> {
   const { input_ids } = kokoro.tokenizer(phonemes, { truncation: true })
   const numTokens = Math.min(Math.max((input_ids.dims.at(-1) ?? 2) - 2, 0), MAX_STYLE_INDEX)
-  const styles = await loadVoice(kokoro.modelId, voice)
-  const style = styles.slice(numTokens * STYLE_DIM, (numTokens + 1) * STYLE_DIM)
+  const style = styles.subarray(numTokens * STYLE_DIM, (numTokens + 1) * STYLE_DIM)
 
   const { waveform } = await kokoro.model({
     input_ids,
@@ -125,11 +147,17 @@ async function fetchVoice(modelId: string, voice: string): Promise<Float32Array>
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Voice "${voice}" not found (${res.status})`)
   const buffer = await res.arrayBuffer()
-  try {
-    await cache?.put(url, new Response(buffer.slice(0), { headers: { 'content-type': 'application/octet-stream' } }))
-  } catch {
-    // Cache is best-effort.
-  }
+  void cache
+    ?.put(
+      url,
+      new Response(buffer, {
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(buffer.byteLength),
+        },
+      })
+    )
+    .catch(() => undefined)
   return new Float32Array(buffer)
 }
 

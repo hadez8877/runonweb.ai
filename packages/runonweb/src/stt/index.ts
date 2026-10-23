@@ -278,9 +278,14 @@ async function prepareAudio(audio: STTAudioInput): Promise<Float32Array | string
   const AudioCtx =
     globalThis.AudioContext ??
     (globalThis as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-  const ctx = new AudioCtx()
+  let ctx: AudioContext
   try {
-    const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0))
+    ctx = new AudioCtx({ sampleRate: SAMPLE_RATE })
+  } catch {
+    ctx = new AudioCtx()
+  }
+  try {
+    const decoded = await ctx.decodeAudioData(arrayBuffer)
     const mono = mixMono(decoded)
     return resample(mono, decoded.sampleRate, SAMPLE_RATE)
   } finally {
@@ -289,11 +294,20 @@ async function prepareAudio(audio: STTAudioInput): Promise<Float32Array | string
 }
 
 function mixMono(buffer: AudioBuffer): Float32Array {
-  if (buffer.numberOfChannels === 1) return new Float32Array(buffer.getChannelData(0))
+  const channels = buffer.numberOfChannels
+  if (channels === 1) return buffer.getChannelData(0)
   const len = buffer.length
   const out = new Float32Array(len)
-  const scale = buffer.numberOfChannels === 2 ? Math.SQRT1_2 : 1 / buffer.numberOfChannels
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
+  if (channels === 2) {
+    const ch0 = buffer.getChannelData(0)
+    const ch1 = buffer.getChannelData(1)
+    for (let i = 0; i < len; i++) {
+      out[i] = (ch0[i]! + ch1[i]!) * Math.SQRT1_2
+    }
+    return out
+  }
+  const scale = 1 / channels
+  for (let c = 0; c < channels; c++) {
     const channel = buffer.getChannelData(c)
     for (let i = 0; i < len; i++) out[i] += channel[i]! * scale
   }

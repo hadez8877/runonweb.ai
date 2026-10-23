@@ -38,13 +38,14 @@ var models = new Map()
 
 async function init(args) {
   var runtime = args.runtimePath
-  var response = await fetch(runtime + 'bergamot-translator-worker.wasm', { credentials: 'omit' })
-  if (!response.ok) throw new Error('Bergamot runtime: HTTP ' + response.status + ' for ' + runtime)
+  var wasmPromise = fetch(runtime + 'bergamot-translator-worker.wasm', { credentials: 'omit' })
 
   await new Promise(function (resolve, reject) {
     Module.instantiateWasm = function (info, accept) {
       var imports = Object.assign({}, info, { wasm_gemm: fallbackGemm() })
       ;(async function () {
+        var response = await wasmPromise
+        if (!response.ok) throw new Error('Bergamot runtime: HTTP ' + response.status + ' for ' + runtime)
         try {
           return (await WebAssembly.instantiateStreaming(response.clone(), imports)).instance
         } catch (_) {

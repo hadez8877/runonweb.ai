@@ -87,15 +87,28 @@ export class TextEmbedder {
     const inputs = Array.isArray(text) ? text : [text]
     if (inputs.length === 0) throw new Error('No text provided')
 
-    const embeddings: Float32Array[] = []
-    for (const item of inputs) {
-      const output = await this.#pipe(item, {
+    let embeddings: Float32Array[]
+    if (inputs.length === 1) {
+      const output = await this.#pipe(inputs[0], {
         pooling: this.#pooling,
         normalize: this.#normalize,
       })
-      // Transformers.js returns a Tensor-like with .data or nested arrays
-      const vector = tensorToFloat32(output)
-      embeddings.push(vector)
+      embeddings = [tensorToFloat32(output)]
+    } else if (this.#pooling !== 'none') {
+      const output = await this.#pipe(inputs, {
+        pooling: this.#pooling,
+        normalize: this.#normalize,
+      })
+      embeddings = batchTensorToFloat32(output, inputs.length)
+    } else {
+      embeddings = []
+      for (const item of inputs) {
+        const output = await this.#pipe(item, {
+          pooling: this.#pooling,
+          normalize: this.#normalize,
+        })
+        embeddings.push(tensorToFloat32(output))
+      }
     }
 
     this.#onProgress?.({ status: 'done' })
@@ -148,6 +161,7 @@ function tensorToFloat32(output: unknown): Float32Array {
   if (output instanceof Float32Array) return output
   if (output && typeof output === 'object') {
     const o = output as { data?: ArrayLike<number>; tolist?: () => unknown }
+    if (o.data instanceof Float32Array) return o.data
     if (o.data) return new Float32Array(o.data as ArrayLike<number>)
     if (typeof o.tolist === 'function') {
       const list = o.tolist()
@@ -158,6 +172,17 @@ function tensorToFloat32(output: unknown): Float32Array {
     return new Float32Array(flattenNumbers(output))
   }
   throw new Error('Unexpected embedding output shape')
+}
+
+function batchTensorToFloat32(output: unknown, batchSize: number): Float32Array[] {
+  const flat = tensorToFloat32(output)
+  if (batchSize <= 1) return [flat]
+  const dim = Math.floor(flat.length / batchSize)
+  const out: Float32Array[] = new Array(batchSize)
+  for (let i = 0; i < batchSize; i++) {
+    out[i] = flat.subarray(i * dim, (i + 1) * dim)
+  }
+  return out
 }
 
 function flattenNumbers(value: unknown): number[] {

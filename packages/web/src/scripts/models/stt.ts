@@ -348,11 +348,10 @@ function selectAudio(file: File | Blob, name: string, opts?: { previewSrc?: stri
   if (transcribeBtn) transcribeBtn.disabled = false
   showPlayer()
   if (!opts?.skipPreview) {
-    if (opts?.previewSrc) void wave?.load(opts.previewSrc, { play: true })
+    if (opts?.previewSrc) void wave?.load(opts.previewSrc, { play: true, blob: file })
     else {
       urls.revokeAll()
-      const src = urls.add(file)
-      void wave?.load(src, { play: true })
+      void wave?.loadBlob(file, { play: true })
     }
   }
   void runTranscribe()
@@ -380,15 +379,27 @@ audioEl?.addEventListener('timeupdate', () => {
 audioEl?.addEventListener('seeked', () => {
   highlight(audioEl.currentTime)
 })
+let pendingSampleSrc: string | null = null
 bindSamples(ui, {
   onSelect: (spec, btn) => {
     if (spec.kind !== 'audio') return
+    pendingSampleSrc = spec.src
     markLanguage(spec.language)
     markActiveSample(btn)
     showPlayer()
-    void wave?.load(spec.src, { play: true })
+    if (audioEl) {
+      const next = new URL(spec.src, location.href).href
+      if (audioEl.src !== next) audioEl.src = spec.src
+      audioEl.currentTime = 0
+      void audioEl.play().catch(() => {})
+    }
   },
-  onFile: (file) => selectAudio(file, file.name, { skipPreview: true }),
+  onFile: (file) => {
+    const src = pendingSampleSrc
+    pendingSampleSrc = null
+    if (src) void wave?.load(src, { blob: file })
+    selectAudio(file, file.name, { skipPreview: true })
+  },
 })
 return () => {
   urls.revokeAll()
@@ -396,5 +407,8 @@ return () => {
   if (highlightRaf) cancelAnimationFrame(highlightRaf)
   stopLive()
   if (recording) mediaRecorder?.stop()
+  wave?.dispose()
+  stt?.dispose()
+  stt = null
 }
 })

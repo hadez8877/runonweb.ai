@@ -1,7 +1,7 @@
 import type { Device, ProgressCallback, ProgressInfo, ResolvedDevice } from '../core/index.ts'
-import { disposeKitten, loadKitten, streamKitten, type LoadedKitten } from './kitten.ts'
-import { disposeKokoro, loadKokoro, streamKokoro, type LoadedKokoro } from './kokoro.ts'
-import { disposeSupertonic, loadSupertonic, streamSupertonic, type LoadedSupertonic } from './supertonic.ts'
+import type { LoadedKitten } from './kitten.ts'
+import type { LoadedKokoro } from './kokoro.ts'
+import type { LoadedSupertonic } from './supertonic.ts'
 import { DEFAULT_TTS_SIZE, type TTSSize } from './sizes.ts'
 import { concatFloat32, float32ToWavBlob } from './wav.ts'
 import { defaultVoiceFor } from './voices.ts'
@@ -13,12 +13,11 @@ export {
   type TTSSize,
 } from './sizes.ts'
 
-export { SUPERTONIC_LANGUAGES, type SupertonicLanguage } from './supertonic.ts'
-
 export {
   DEFAULT_MULTI_VOICE,
   DEFAULT_TINY_VOICE,
   DEFAULT_VOICE,
+  SUPERTONIC_LANGUAGES,
   TTS_LANGUAGES,
   TTS_VOICE_GROUPS,
   TTS_VOICES,
@@ -27,6 +26,7 @@ export {
   voiceGroupsFor,
   voiceLabel,
   voicesFor,
+  type SupertonicLanguage,
   type TTSGender,
   type TTSLanguage,
   type TTSLocale,
@@ -90,6 +90,9 @@ export class TextToSpeech {
   #kokoro: LoadedKokoro | null = null
   #kitten: LoadedKitten | null = null
   #supertonic: LoadedSupertonic | null = null
+  #kokoroMod: typeof import('./kokoro.ts') | null = null
+  #kittenMod: typeof import('./kitten.ts') | null = null
+  #supertonicMod: typeof import('./supertonic.ts') | null = null
   #loading: Promise<void> | null = null
   #resolvedDevice: ResolvedDevice | null = null
 
@@ -130,12 +133,16 @@ export class TextToSpeech {
 
   async #loadInternal(): Promise<void> {
     if (this.#size === 'tiny') {
-      this.#kitten = await loadKitten(this.#onProgress)
+      const mod = await import('./kitten.ts')
+      this.#kittenMod = mod
+      this.#kitten = await mod.loadKitten(this.#onProgress)
       this.#resolvedDevice = 'wasm'
       return
     }
     if (this.#size === 'multi') {
-      this.#supertonic = await loadSupertonic({
+      const mod = await import('./supertonic.ts')
+      this.#supertonicMod = mod
+      this.#supertonic = await mod.loadSupertonic({
         model: this.#model,
         device: this.#device,
         onProgress: this.#onProgress,
@@ -143,7 +150,9 @@ export class TextToSpeech {
       this.#resolvedDevice = this.#supertonic.device
       return
     }
-    this.#kokoro = await loadKokoro({
+    const mod = await import('./kokoro.ts')
+    this.#kokoroMod = mod
+    this.#kokoro = await mod.loadKokoro({
       model: this.#model,
       device: this.#device,
       onProgress: this.#onProgress,
@@ -164,12 +173,12 @@ export class TextToSpeech {
     const steps = options.steps ?? this.#steps
 
     const stream =
-      this.#size === 'tiny' && this.#kitten
-        ? streamKitten(this.#kitten, text, voice, speed)
-        : this.#size === 'multi' && this.#supertonic
-          ? streamSupertonic(this.#supertonic, text, voice, speed, language, steps)
-          : this.#kokoro
-            ? streamKokoro(this.#kokoro, text, voice, speed)
+      this.#size === 'tiny' && this.#kitten && this.#kittenMod
+        ? this.#kittenMod.streamKitten(this.#kitten, text, voice, speed)
+        : this.#size === 'multi' && this.#supertonic && this.#supertonicMod
+          ? this.#supertonicMod.streamSupertonic(this.#supertonic, text, voice, speed, language, steps)
+          : this.#kokoro && this.#kokoroMod
+            ? this.#kokoroMod.streamKokoro(this.#kokoro, text, voice, speed)
             : null
 
     if (!stream) throw new Error('TextToSpeech model failed to load')
@@ -198,9 +207,9 @@ export class TextToSpeech {
   }
 
   dispose(): void {
-    disposeKokoro(this.#kokoro)
-    disposeKitten(this.#kitten)
-    disposeSupertonic(this.#supertonic)
+    this.#kokoroMod?.disposeKokoro(this.#kokoro)
+    this.#kittenMod?.disposeKitten(this.#kitten)
+    this.#supertonicMod?.disposeSupertonic(this.#supertonic)
     this.#kokoro = null
     this.#kitten = null
     this.#supertonic = null

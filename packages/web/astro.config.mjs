@@ -98,6 +98,9 @@ export default defineConfig({
   ],
   vite: {
     plugins: [tailwindcss()],
+    worker: {
+      format: 'es',
+    },
     optimizeDeps: {
       exclude: ['@huggingface/transformers', 'onnxruntime-web', 'paddleocr', 'phonemizer', 'runonweb/image'],
     },

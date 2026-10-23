@@ -1,6 +1,7 @@
 import type { Device, ProgressCallback, ProgressInfo, ResolvedDevice } from '../core/index.ts'
-import { resolveDevice } from '../core/device.ts'
-import { PaddleOcrService } from 'paddleocr'
+import { OCR_CACHE_NAME } from '../core/cache.ts'
+import { resolveDevice, takeOrtTurn } from '../core/device.ts'
+import type { PaddleOcrService } from 'paddleocr'
 import { DEFAULT_OCR_SIZE, type OCRSize } from './sizes.ts'
 
 export { DEFAULT_OCR_SIZE, OCR_SIZES, type OCRSize } from './sizes.ts'
@@ -29,7 +30,7 @@ const PRESET = {
   medium: 'PP-OCRv6_medium',
 } as const
 
-const CACHE = 'runonweb-ppocrv6'
+const CACHE = OCR_CACHE_NAME
 const ORT_WASM = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/'
 
 export type OCROptions = {
@@ -107,10 +108,16 @@ export class OCR {
       const urls = HF[this.#size]
       this.#onProgress?.({ status: 'loading', progress: 0 })
 
-      const [det, rec, yml] = await Promise.all([
-        fetchCached(urls.det, 'det.onnx', this.#onProgress),
-        fetchCached(urls.rec, 'rec.onnx', this.#onProgress),
-        fetchCachedText(urls.yml),
+      const cachePromise = openOcrCache()
+      const totals = new OcrProgressTotals(this.#onProgress)
+
+      const [det, rec, yml, ort, preferred, { PaddleOcrService: PaddleOcrServiceCtor }] = await Promise.all([
+        fetchCached(urls.det, 'det.onnx', totals, cachePromise),
+        fetchCached(urls.rec, 'rec.onnx', totals, cachePromise),
+        fetchCachedText(urls.yml, cachePromise),
+        loadOrt(),
+        resolveDevice(this.#device),
+        import('paddleocr'),
       ])
 
       const charactersDictionary = parseCharacterDict(yml)
@@ -118,10 +125,9 @@ export class OCR {
         charactersDictionary.push(' ')
       }
 
-      const ort = await loadOrt()
-      const preferred = await resolveDevice(this.#device)
       const service = await createService({
         ort,
+        PaddleOcrServiceCtor,
         size: this.#size,
         det,
         rec,
@@ -130,7 +136,7 @@ export class OCR {
       })
 
       if (this.#disposed) {
-        await takeTurn(() => service.ocr.destroy())
+        await takeOrtTurn(() => service.ocr.destroy())
         return
       }
 
@@ -172,7 +178,7 @@ export class OCR {
       this.#service = null
       this.#resolvedDevice = null
       if (!service) return
-      await takeTurn(() => service.destroy())
+      await takeOrtTurn(() => service.destroy())
     })()
     return this.#disposeDone
   }
@@ -186,7 +192,7 @@ export class OCR {
 
     this.#onProgress?.({ status: 'recognizing' })
     const pixels = await imageToPixels(image)
-    const raw = await takeTurn(() => {
+    const raw = await takeOrtTurn(() => {
       if (this.#disposed) throw new Error('OCR model was disposed')
       return service.recognize(pixels)
     })
@@ -221,22 +227,6 @@ export async function read(image: OCRImageInput, options?: OCROptions): Promise<
   }
 }
 
-/**
- * onnxruntime-web's WebGPU backend keeps a single global OrtRun slot.
- * A second run throws "Session already started", and its `finally` clears
- * that slot, so the first run then throws "Session mismatch".
- */
-let ortTurn: Promise<void> = Promise.resolve()
-
-function takeTurn<T>(fn: () => Promise<T>): Promise<T> {
-  const run = ortTurn.then(fn, fn)
-  ortTurn = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  return run
-}
-
 export type { ProgressInfo, Device }
 
 type OrtApi = {
@@ -247,19 +237,22 @@ type OrtApi = {
   }
 }
 
-let ortModule: OrtApi | null = null
+let ortPromise: Promise<OrtApi> | null = null
 
-async function loadOrt(): Promise<OrtApi> {
-  if (ortModule) return ortModule
-  const ort = (await import('onnxruntime-web')) as unknown as OrtApi
-  ort.env.wasm.wasmPaths = ORT_WASM
-  ort.env.wasm.numThreads = 1
-  ortModule = ort
-  return ort
+function loadOrt(): Promise<OrtApi> {
+  if (ortPromise) return ortPromise
+  ortPromise = (async () => {
+    const ort = (await import('onnxruntime-web')) as unknown as OrtApi
+    ort.env.wasm.wasmPaths = ORT_WASM
+    ort.env.wasm.numThreads = 1
+    return ort
+  })()
+  return ortPromise
 }
 
 async function createService(opts: {
   ort: OrtApi
+  PaddleOcrServiceCtor: typeof PaddleOcrService
   size: OCRSize
   det: ArrayBuffer
   rec: ArrayBuffer
@@ -275,12 +268,14 @@ async function createService(opts: {
           opts.ort.InferenceSession.create(modelBuffer, { executionProviders: providers }),
       },
     }
-    return PaddleOcrService.createInstance({
+    // Only clone buffers when trying WebGPU first, so fallback to WASM still has intact buffers.
+    const needsFallbackCopy = device === 'webgpu'
+    return opts.PaddleOcrServiceCtor.createInstance({
       ort: wrapped as never,
       modelPreset: PRESET[opts.size],
-      detection: { modelBuffer: opts.det.slice(0) },
+      detection: { modelBuffer: needsFallbackCopy ? opts.det.slice(0) : opts.det },
       recognition: {
-        modelBuffer: opts.rec.slice(0),
+        modelBuffer: needsFallbackCopy ? opts.rec.slice(0) : opts.rec,
         charactersDictionary: opts.charactersDictionary,
       },
     })
@@ -294,16 +289,49 @@ async function createService(opts: {
   }
 }
 
+class OcrProgressTotals {
+  #loaded = new Map<string, number>()
+  #total = new Map<string, number>()
+  #cb?: ProgressCallback
+  #lastEmit = 0
+
+  constructor(cb?: ProgressCallback) {
+    this.#cb = cb
+  }
+
+  update(file: string, loaded: number, total: number, force = false): void {
+    this.#loaded.set(file, loaded)
+    if (total > 0) this.#total.set(file, total)
+    if (!this.#cb) return
+    const now = performance.now()
+    if (!force && loaded < total && now - this.#lastEmit < 32) return
+    this.#lastEmit = now
+    let sumLoaded = 0
+    let sumTotal = 0
+    for (const v of this.#loaded.values()) sumLoaded += v
+    for (const v of this.#total.values()) sumTotal += v
+    const progress = sumTotal > 0 ? (sumLoaded / sumTotal) * 100 : undefined
+    this.#cb({ status: 'progress', file, loaded: sumLoaded, total: sumTotal, progress })
+  }
+}
+
+function openOcrCache(): Promise<Cache | null> {
+  if (typeof caches === 'undefined') return Promise.resolve(null)
+  return caches.open(CACHE).catch(() => null)
+}
+
 async function fetchCached(
   url: string,
   file: string,
-  onProgress?: ProgressCallback
+  totals: OcrProgressTotals,
+  cachePromise: Promise<Cache | null>
 ): Promise<ArrayBuffer> {
-  const cache = await caches.open(CACHE).catch(() => null)
+  const cache = await cachePromise
   const hit = await cache?.match(url)
   if (hit) {
-    onProgress?.({ status: 'progress', progress: 100, file })
-    return hit.arrayBuffer()
+    const buf = await hit.arrayBuffer()
+    totals.update(file, buf.byteLength, buf.byteLength, true)
+    return buf
   }
 
   const res = await fetch(url)
@@ -312,40 +340,51 @@ async function fetchCached(
   const total = Number(res.headers.get('content-length') ?? 0)
   if (!res.body || !total) {
     const buf = await res.arrayBuffer()
-    await cache?.put(url, new Response(buf.slice(0)))
+    totals.update(file, buf.byteLength, buf.byteLength, true)
+    void cache?.put(
+      url,
+      new Response(buf, { headers: { 'content-length': String(buf.byteLength) } })
+    )
     return buf
   }
 
+  totals.update(file, 0, total, true)
   const reader = res.body.getReader()
-  const chunks: Uint8Array[] = []
+  let out = new Uint8Array(total)
   let received = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
-    chunks.push(value)
+    if (received + value.byteLength > out.byteLength) {
+      const grown = new Uint8Array(Math.max(out.byteLength * 2, received + value.byteLength))
+      grown.set(out.subarray(0, received))
+      out = grown
+    }
+    out.set(value, received)
     received += value.byteLength
-    onProgress?.({ status: 'progress', progress: (received / total) * 100, file, loaded: received, total })
+    totals.update(file, received, total, received >= total)
   }
 
-  const out = new Uint8Array(received)
-  let offset = 0
-  for (const chunk of chunks) {
-    out.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  const buf = out.buffer
-  await cache?.put(url, new Response(buf.slice(0)))
+  const finalBytes = received === out.byteLength ? out : out.subarray(0, received)
+  const buf =
+    finalBytes.byteOffset === 0 && finalBytes.byteLength === finalBytes.buffer.byteLength
+      ? (finalBytes.buffer as ArrayBuffer)
+      : finalBytes.slice().buffer
+  void cache?.put(
+    url,
+    new Response(buf, { headers: { 'content-length': String(buf.byteLength) } })
+  )
   return buf
 }
 
-async function fetchCachedText(url: string): Promise<string> {
-  const cache = await caches.open(CACHE).catch(() => null)
+async function fetchCachedText(url: string, cachePromise: Promise<Cache | null>): Promise<string> {
+  const cache = await cachePromise
   const hit = await cache?.match(url)
   if (hit) return hit.text()
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Could not load dictionary (${res.status})`)
   const text = await res.text()
-  await cache?.put(url, new Response(text))
+  void cache?.put(url, new Response(text))
   return text
 }
 
@@ -378,7 +417,11 @@ function unquoteYaml(value: string): string {
 
 async function imageToPixels(image: OCRImageInput): Promise<{ width: number; height: number; data: Uint8Array }> {
   if (image instanceof ImageData) {
-    return { width: image.width, height: image.height, data: new Uint8Array(image.data) }
+    return {
+      width: image.width,
+      height: image.height,
+      data: new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength),
+    }
   }
 
   let source: CanvasImageSource
@@ -402,7 +445,11 @@ async function imageToPixels(image: OCRImageInput): Promise<{ width: number; hei
   ctx.drawImage(source, 0, 0)
   const { data } = ctx.getImageData(0, 0, width, height)
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) source.close()
-  return { width, height, data: new Uint8Array(data) }
+  return {
+    width,
+    height,
+    data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+  }
 }
 
 function loadHtmlImage(src: string): Promise<HTMLImageElement> {

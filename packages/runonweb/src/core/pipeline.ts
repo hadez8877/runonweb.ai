@@ -39,13 +39,18 @@ export type LoadedPipeline = {
  * Shared loader for Transformers.js pipelines with device resolution + progress.
  */
 export async function loadPipeline(options: PipelineLoadOptions): Promise<LoadedPipeline> {
-  let device = await resolveDevice(options.device ?? 'auto')
+  options.onProgress?.({ status: 'loading', progress: 0 })
+
+  const [resolvedDevice, { pipeline, env }] = await Promise.all([
+    resolveDevice(options.device ?? 'auto'),
+    import('@huggingface/transformers'),
+  ])
+
+  let device = resolvedDevice
   if (options.supportedDevices && !options.supportedDevices.includes(device)) {
     device = 'wasm'
   }
-  options.onProgress?.({ status: 'loading', progress: 0 })
 
-  const { pipeline, env } = await import('@huggingface/transformers')
   // The threaded WASM build crashes with "memory access out of bounds" when the
   // page is not cross-origin isolated (no SharedArrayBuffer). It happens at the
   // end of the first download and a reload works. One thread avoids the spawn.
@@ -65,8 +70,14 @@ export async function loadPipeline(options: PipelineLoadOptions): Promise<Loaded
       ? options.dtype(device)
       : (options.dtype ?? (device === 'webgpu' ? 'fp32' : 'q8'))
 
+  const isNode =
+    typeof process !== 'undefined' &&
+    Boolean((process as { versions?: { node?: string } }).versions?.node) &&
+    typeof window === 'undefined' &&
+    typeof WorkerGlobalScope === 'undefined'
+
   const pipe = await pipeline(options.task as never, options.model, {
-    device,
+    device: (isNode && device === 'wasm' ? 'cpu' : device) as never,
     dtype,
     progress_callback: (data: Record<string, unknown>) => {
       options.onProgress?.(toProgressInfo(data))
@@ -86,7 +97,9 @@ export async function imageToPipelineInput(
   const { RawImage } = await import('@huggingface/transformers')
 
   if (image instanceof HTMLImageElement) {
-    if (image.src && !image.src.startsWith('blob:')) return image.src
+    if (!image.complete || image.naturalWidth === 0) {
+      if (image.src && !image.src.startsWith('blob:')) return image.src
+    }
     const canvas = document.createElement('canvas')
     canvas.width = image.naturalWidth || image.width
     canvas.height = image.naturalHeight || image.height
@@ -104,10 +117,5 @@ export async function imageToPipelineInput(
     return new RawImage(image.data, image.width, image.height, 4)
   }
 
-  const url = URL.createObjectURL(image)
-  try {
-    return await RawImage.fromURL(url)
-  } finally {
-    URL.revokeObjectURL(url)
-  }
+  return RawImage.fromBlob(image)
 }

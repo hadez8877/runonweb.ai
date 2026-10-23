@@ -9,12 +9,27 @@ export const CACHE_NAME = 'transformers-cache'
 /** Cache Storage bucket used by `runonweb/translate` for Firefox Translations models. */
 export const TRANSLATE_CACHE_NAME = 'runonweb-translate'
 
+/** Cache Storage bucket used by `runonweb/ocr` for PP-OCRv5 models. */
+export const OCR_CACHE_NAME = 'runonweb-ppocrv6'
+
+/** Cache Storage buckets used by `runonweb/tts` engines. */
+export const KITTEN_CACHE_NAME = 'runonweb-kitten-tts'
+export const KOKORO_CACHE_NAME = 'runonweb-kokoro-voices'
+export const SUPERTONIC_CACHE_NAME = 'runonweb-supertonic-voices'
+
 /** Cache Storage bucket used by Bonsai Image (range-request leftovers). */
 export const BONSAI_CACHE_NAME = 'bonsai-pipeline-v1'
 /** IndexedDB used by the Bonsai Image WebGPU engine for safetensor chunks. */
 export const BONSAI_IDB_NAME = 'bonsai-image-v1'
 
-const EXTRA_CACHE_NAMES = [BONSAI_CACHE_NAME, TRANSLATE_CACHE_NAME]
+const EXTRA_CACHE_NAMES = [
+  BONSAI_CACHE_NAME,
+  TRANSLATE_CACHE_NAME,
+  OCR_CACHE_NAME,
+  KITTEN_CACHE_NAME,
+  KOKORO_CACHE_NAME,
+  SUPERTONIC_CACHE_NAME,
+]
 
 export type CachedFile = {
   url: string
@@ -33,11 +48,15 @@ export type CachedModel = {
 const HF_RE = /^https?:\/\/[^/]+\/(?:datasets\/)?([^/]+\/[^/]+)\/resolve\/[^/]+\/(.+)$/
 /** `<base>/<from>-<to>/<model|lex|vocab file>?rev=…` as written by `runonweb/translate`. */
 const TRANSLATE_RE = /\/([a-z]{2,3}(?:-Han[st])?-[a-z]{2,3}(?:-Han[st])?)\/((?:model|lex|vocab|srcvocab|trgvocab)\.[^/?]+)(?:\?.*)?$/
+/** Self-hosted `/models/<name>/<file>` assets (e.g. `/models/text2emoji-tiny/...`). */
+const LOCAL_MODEL_RE = /\/models\/(text2emoji-tiny)\/(.+)$/
 
 /** Split a cached request URL into a model id and a path inside it. */
 function identify(url: string): { id: string; path: string } {
   const t = TRANSLATE_RE.exec(url)
   if (t) return { id: `firefox-translations/${t[1]}`, path: t[2] }
+  const l = LOCAL_MODEL_RE.exec(url)
+  if (l) return { id: `midudev/${l[1]}`, path: l[2] }
   const m = HF_RE.exec(url)
   return { id: m?.[1] ?? 'other', path: m?.[2] ?? url }
 }
@@ -60,17 +79,26 @@ async function collectCacheBucket(cacheName: string, byModel: Map<string, Cached
   if (!cachesAvailable()) return
   let cache: Cache
   try {
+    if (typeof caches.has === 'function' && !(await caches.has(cacheName))) return
     cache = await caches.open(cacheName)
   } catch {
     return
   }
   const requests = await cache.keys()
-  for (const req of requests) {
-    const { id, path } = identify(req.url)
-    const res = await cache.match(req)
-    const bytes = res ? await responseSize(res) : 0
+  if (requests.length === 0) return
+
+  const entries = await Promise.all(
+    requests.map(async (req) => {
+      const { id, path } = identify(req.url)
+      const res = await cache.match(req)
+      const bytes = res ? await responseSize(res) : 0
+      return { id, url: req.url, path, bytes }
+    })
+  )
+
+  for (const { id, url, path, bytes } of entries) {
     const entry = byModel.get(id) ?? { id, files: [], bytes: 0 }
-    entry.files.push({ url: req.url, path, bytes })
+    entry.files.push({ url, path, bytes })
     entry.bytes += bytes
     byModel.set(id, entry)
   }
@@ -145,15 +173,37 @@ async function listBonsaiIndexedDb(): Promise<CachedModel | null> {
   })
 }
 
+/** Fast check for whether any model weights are cached in this origin without reading bodies. */
+export async function hasCachedModels(): Promise<boolean> {
+  const allBuckets = [CACHE_NAME, ...EXTRA_CACHE_NAMES]
+  if (cachesAvailable()) {
+    const bucketChecks = await Promise.all(
+      allBuckets.map(async (name) => {
+        try {
+          if (typeof caches.has === 'function' && !(await caches.has(name))) return false
+          const cache = await caches.open(name)
+          const keys = await cache.keys()
+          return keys.length > 0
+        } catch {
+          return false
+        }
+      })
+    )
+    if (bucketChecks.some(Boolean)) return true
+  }
+  return idbExists(BONSAI_IDB_NAME)
+}
+
 /** List every model cached in this origin, largest first. */
 export async function listCachedModels(): Promise<CachedModel[]> {
   const byModel = new Map<string, CachedModel>()
-  await collectCacheBucket(CACHE_NAME, byModel)
-  for (const name of EXTRA_CACHE_NAMES) {
-    await collectCacheBucket(name, byModel)
-  }
+  const allBuckets = [CACHE_NAME, ...EXTRA_CACHE_NAMES]
 
-  const bonsai = await listBonsaiIndexedDb()
+  const [, bonsai] = await Promise.all([
+    Promise.all(allBuckets.map((name) => collectCacheBucket(name, byModel))),
+    listBonsaiIndexedDb(),
+  ])
+
   if (bonsai) {
     const existing = byModel.get(bonsai.id)
     if (existing) {
@@ -182,23 +232,23 @@ async function clearCacheBucketForModel(cacheName: string, modelId: string): Pro
   if (!cachesAvailable()) return 0
   let cache: Cache
   try {
+    if (typeof caches.has === 'function' && !(await caches.has(cacheName))) return 0
     cache = await caches.open(cacheName)
   } catch {
     return 0
   }
-  let removed = 0
-  for (const req of await cache.keys()) {
-    if (identify(req.url).id === modelId && (await cache.delete(req))) removed++
-  }
-  return removed
+  const keys = await cache.keys()
+  const matching = keys.filter((req) => identify(req.url).id === modelId)
+  if (matching.length === 0) return 0
+  const results = await Promise.all(matching.map((req) => cache.delete(req)))
+  return results.filter(Boolean).length
 }
 
 /** Delete the cached files of one model. Returns the number of entries removed. */
 export async function clearModelCache(modelId: string): Promise<number> {
-  let removed = await clearCacheBucketForModel(CACHE_NAME, modelId)
-  for (const name of EXTRA_CACHE_NAMES) {
-    removed += await clearCacheBucketForModel(name, modelId)
-  }
+  const allBuckets = [CACHE_NAME, ...EXTRA_CACHE_NAMES]
+  const counts = await Promise.all(allBuckets.map((name) => clearCacheBucketForModel(name, modelId)))
+  let removed = counts.reduce((sum, n) => sum + n, 0)
   if (modelId.includes('bonsai-image') && (await deleteIndexedDb(BONSAI_IDB_NAME))) {
     removed += 1
   }
@@ -209,15 +259,21 @@ export async function clearModelCache(modelId: string): Promise<number> {
 export async function clearAllModelCache(): Promise<number> {
   let removed = 0
   if (cachesAvailable()) {
-    for (const name of [CACHE_NAME, ...EXTRA_CACHE_NAMES]) {
-      try {
-        const cache = await caches.open(name)
-        removed += (await cache.keys()).length
-        await caches.delete(name)
-      } catch {
-        // Bucket may not exist.
-      }
-    }
+    const allBuckets = [CACHE_NAME, ...EXTRA_CACHE_NAMES]
+    const counts = await Promise.all(
+      allBuckets.map(async (name) => {
+        try {
+          if (typeof caches.has === 'function' && !(await caches.has(name))) return 0
+          const cache = await caches.open(name)
+          const count = (await cache.keys()).length
+          await caches.delete(name)
+          return count
+        } catch {
+          return 0
+        }
+      })
+    )
+    removed += counts.reduce((sum, n) => sum + n, 0)
   }
   if (await deleteIndexedDb(BONSAI_IDB_NAME)) removed += 1
   return removed

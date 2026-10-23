@@ -89,4 +89,8 @@ bindSamples(ui, {
     void runRank()
   },
 })
+return () => {
+  embedder?.dispose()
+  embedder = null
+}
 })

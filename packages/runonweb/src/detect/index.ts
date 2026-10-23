@@ -220,31 +220,40 @@ function decodeSigmoid(
   const dims = logits.dims
   const numQueries = dims.length === 3 ? dims[1]! : dims[0]!
   const numClasses = dims.length === 3 ? dims[2]! : dims[1]!
-  const batch = dims.length === 3 ? logits[0]! : logits
-  const boxBatch = dims.length === 3 ? boxes[0]! : boxes
+  const logitData = logits.data
+  const boxData = boxes.data
   const labels = labelList(options.id2label, numClasses)
+  const threshold = options.threshold
+  const logitThreshold =
+    threshold <= 0 ? -Infinity : threshold >= 1 ? Infinity : -Math.log(1 / threshold - 1)
 
   const out: Detection[] = []
   for (let j = 0; j < numQueries; j++) {
-    const scores = batch[j]!.data
-    let best = -Infinity
+    const base = j * numClasses
+    let bestLogit = -Infinity
     let bestIdx = 0
     for (let k = 0; k < numClasses; k++) {
-      const p = 1 / (1 + Math.exp(-scores[k]!))
-      if (p > best) {
-        best = p
+      const v = logitData[base + k]!
+      if (v > bestLogit) {
+        bestLogit = v
         bestIdx = k
       }
     }
-    if (best < options.threshold) continue
+    if (bestLogit < logitThreshold) continue
+    const best = 1 / (1 + Math.exp(-bestLogit))
+    if (best < threshold) continue
     const label = labels[bestIdx]
     if (!label) continue
 
-    const [cx, cy, bw, bh] = Array.from(boxBatch[j]!.data)
-    let xmin = cx! - bw! / 2
-    let ymin = cy! - bh! / 2
-    let xmax = cx! + bw! / 2
-    let ymax = cy! + bh! / 2
+    const boxBase = j * 4
+    const cx = boxData[boxBase]!
+    const cy = boxData[boxBase + 1]!
+    const bw = boxData[boxBase + 2]!
+    const bh = boxData[boxBase + 3]!
+    let xmin = cx - bw / 2
+    let ymin = cy - bh / 2
+    let xmax = cx + bw / 2
+    let ymax = cy + bh / 2
     if (options.size) {
       xmin *= options.size.width
       xmax *= options.size.width
@@ -260,15 +269,31 @@ function decodeSigmoid(
   return out
 }
 
+const labelListCache = new WeakMap<Record<string, string>, Map<number, Array<string | undefined>>>()
+
 function labelList(id2label: Record<string, string>, numClasses: number): Array<string | undefined> {
+  let byCount = labelListCache.get(id2label)
+  if (byCount) {
+    const cached = byCount.get(numClasses)
+    if (cached) return cached
+  } else {
+    byCount = new Map()
+    labelListCache.set(id2label, byCount)
+  }
+
   const byId = Object.entries(id2label)
     .map(([id, name]) => [Number(id), name] as const)
     .sort((a, b) => a[0] - b[0])
-  if (byId.length === numClasses) return byId.map(([, name]) => name)
-
-  const sparse: Array<string | undefined> = Array.from({ length: numClasses })
-  for (const [id, name] of byId) {
-    if (id >= 0 && id < numClasses) sparse[id] = name
+  let result: Array<string | undefined>
+  if (byId.length === numClasses) {
+    result = byId.map(([, name]) => name)
+  } else {
+    const sparse: Array<string | undefined> = Array.from({ length: numClasses })
+    for (const [id, name] of byId) {
+      if (id >= 0 && id < numClasses) sparse[id] = name
+    }
+    result = sparse
   }
-  return sparse
+  byCount.set(numClasses, result)
+  return result
 }

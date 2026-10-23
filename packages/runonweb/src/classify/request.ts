@@ -133,13 +133,14 @@ export function optionText(name: string, desc: JSONContent): string {
 }
 
 const MONTHS = 'January|February|March|April|May|June|July|August|September|October|November|December'
+const MONTH_LIST = MONTHS.split('|')
 const DATE_RE = new RegExp(`\\b(?:${MONTHS}) \\d{1,2}, \\d{4}\\b|\\b\\d{4}-\\d{2}-\\d{2}\\b`, 'g')
 
 function parseDate(raw: string): number | null {
   let y: number, m: number, d: number
   if (raw.includes(',')) {
     const [month, day, year] = raw.replace(',', '').split(' ')
-    m = MONTHS.split('|').indexOf(month!) + 1
+    m = MONTH_LIST.indexOf(month!) + 1
     d = Number(day)
     y = Number(year)
   } else {
@@ -238,7 +239,13 @@ const round = (x: number) => Math.round(x * 10_000) / 10_000
 
 export function choiceConfidence(p: ArrayLike<number>): number {
   const K = p.length
-  return K === 1 ? 1 : (Math.max(...Array.from(p)) - 1 / K) / (1 - 1 / K)
+  if (K === 1) return 1
+  let max = -Infinity
+  for (let i = 0; i < K; i++) {
+    const v = p[i]!
+    if (v > max) max = v
+  }
+  return (max - 1 / K) / (1 - 1 / K)
 }
 
 export function scoreConfidence(p: ArrayLike<number>): number {

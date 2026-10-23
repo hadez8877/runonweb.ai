@@ -410,5 +410,7 @@ bindSamples(ui, { onFile: pick })
 return () => {
   stopWebcam()
   urls.revokeAll()
+  detector?.dispose()
+  detector = null
 }
 })

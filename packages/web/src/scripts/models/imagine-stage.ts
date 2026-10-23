@@ -189,6 +189,7 @@ export function createImagineStage(canvas: HTMLCanvasElement): ImagineStage {
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches
 
   const base = new Uint8Array(PX)
+  const cells = new Uint8Array(PX)
   paintRoom(base)
 
   let progress = 0
@@ -198,7 +199,7 @@ export function createImagineStage(canvas: HTMLCanvasElement): ImagineStage {
 
   function draw(now: number) {
     const t = reduce ? 1.2 : now / 1000
-    const cells = base.slice()
+    cells.set(base)
     const blink = !reduce && Math.floor(t * 0.35) % 9 === 0
     const bob = !reduce && Math.floor(t * 2) % 2 === 0 ? 1 : 0
     const scanY = 16 + Math.floor((Math.sin(t * 1.6) * 0.5 + 0.5) * 16)
@@ -331,10 +332,10 @@ const STARS: Array<[number, number]> = [
 ]
 
 const RGBS: RGB[] = []
-const KEY = new Map<string, number>()
+const KEY = new Map<number, number>()
 
 function rgbKey(rgb: RGB): number {
-  const id = `${rgb[0]},${rgb[1]},${rgb[2]}`
+  const id = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
   let k = KEY.get(id)
   if (k == null) {
     k = RGBS.length
@@ -363,11 +364,13 @@ function fill(cells: Uint8Array, x: number, y: number, w: number, h: number, ch:
 }
 
 function stamp(cells: Uint8Array, rows: string[], ox: number, oy: number) {
-  rows.forEach((row, y) => {
-    ;[...row].forEach((ch, x) => {
+  for (let y = 0; y < rows.length; y++) {
+    const row = rows[y]!
+    for (let x = 0; x < row.length; x++) {
+      const ch = row[x]!
       if (ch !== '.' && ch !== ' ') plot(cells, ox + x, oy + y, ch)
-    })
-  })
+    }
+  }
 }
 
 function paintRoom(cells: Uint8Array) {

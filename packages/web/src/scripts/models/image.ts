@@ -10,10 +10,12 @@ const runBtn = ui.el<HTMLButtonElement>('run')
 const downloadLink = ui.el<HTMLAnchorElement>('download')
 const preview = ui.el('preview')
 const stageEl = ui.el('stage')
-const stage = (() => {
-  const canvas = ui.el<HTMLCanvasElement>('canvas')
-  return canvas ? createImagineStage(canvas) : null
-})()
+const canvas = ui.el<HTMLCanvasElement>('canvas')
+let stage: ReturnType<typeof createImagineStage> | null = null
+const getStage = () => {
+  if (!stage && canvas) stage = createImagineStage(canvas)
+  return stage
+}
 const resultImg = ui.el<HTMLImageElement>('result')
 const seedEl = ui.el('seed')
 const sizeBtns = [...document.querySelectorAll<HTMLButtonElement>('[data-img-size]')]
@@ -37,7 +39,7 @@ function showStage(on: boolean) {
   if (on) {
     if (preview) preview.hidden = true
     if (stageEl) stageEl.hidden = false
-    stage?.start()
+    getStage()?.start()
     return
   }
   stage?.stop()

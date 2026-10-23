@@ -21,7 +21,7 @@ const attr: Record<string, string> = { ['data-' + prefix + '-samples']: '', 'dat
           class="group/s relative size-14 overflow-hidden border border-line bg-bg-3 transition hover:border-fg-2 focus-visible:border-fg focus-visible:outline-none"
           title={s.label}
         >
-          <img src={s.src} alt={s.label} loading="lazy" decoding="async" class="size-full object-cover transition group-hover/s:scale-105" />
+          <img src={s.src} alt={s.label} width="56" height="56" loading="lazy" decoding="async" class="size-full object-cover transition group-hover/s:scale-105" />
         </button>
       ) : (
         <Button variant="soft" size="sm" data-sample={i} aria-pressed="false">

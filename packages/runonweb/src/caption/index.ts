@@ -1,5 +1,5 @@
 import type { Device, ProgressCallback, ProgressInfo, ResolvedDevice } from '../core/index.ts'
-import { resolveDevice } from '../core/device.ts'
+import { resolveDevice, supportsShaderF16 } from '../core/device.ts'
 import { imageToPipelineInput } from '../core/pipeline.ts'
 import { toProgressInfo } from '../core/progress.ts'
 
@@ -90,16 +90,6 @@ type VlmProcessor = {
 type RawImageLike = {
   width: number
   height: number
-}
-
-async function supportsShaderF16(): Promise<boolean> {
-  try {
-    const gpu = (globalThis as { navigator?: { gpu?: GPU } }).navigator?.gpu
-    const adapter = await gpu?.requestAdapter()
-    return Boolean(adapter?.features.has('shader-f16'))
-  } catch {
-    return false
-  }
 }
 
 function dtypeFor(device: ResolvedDevice, fp16: boolean) {
@@ -211,10 +201,12 @@ export class ImageCaptioner {
   async #loadOn(device: ResolvedDevice): Promise<void> {
     this.#onProgress?.({ status: 'loading', progress: 0 })
 
-    const { AutoModelForImageTextToText, AutoProcessor, env } = await import('@huggingface/transformers')
+    const [{ AutoModelForImageTextToText, AutoProcessor, env }, fp16] = await Promise.all([
+      import('@huggingface/transformers'),
+      device === 'webgpu' ? supportsShaderF16() : Promise.resolve(false),
+    ])
     env.allowLocalModels = false
 
-    const fp16 = device === 'webgpu' && (await supportsShaderF16())
     const progress_callback = (data: Record<string, unknown>) => {
       this.#onProgress?.(toProgressInfo(data))
     }

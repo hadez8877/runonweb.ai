@@ -1,4 +1,5 @@
 import type { Device, ProgressCallback, ProgressInfo } from '../core/index.ts'
+import { isWebGPUAvailable, supportsShaderF16 } from '../core/device.ts'
 import { loadPipeline } from '../core/pipeline.ts'
 
 /**
@@ -132,19 +133,24 @@ export class TranscriptCleaner {
     if (this.#loading) return this.#loading
 
     this.#loading = (async () => {
-      const attempts =
+      const canUseWebGPU = this.#device !== 'wasm' && (await isWebGPUAvailable())
+      const hasF16 = canUseWebGPU && (await supportsShaderF16())
+
+      const webgpuAttempts: Array<{ device: 'webgpu' | 'wasm'; dtype: 'q4f16' | 'q4' }> = hasF16
+        ? [
+            { device: 'webgpu', dtype: 'q4f16' },
+            { device: 'webgpu', dtype: 'q4' },
+          ]
+        : [{ device: 'webgpu', dtype: 'q4' }]
+
+      const attempts: Array<{ device: 'webgpu' | 'wasm'; dtype: 'q4f16' | 'q4' }> =
         this.#device === 'wasm'
-          ? [{ device: 'wasm' as const, dtype: 'q4' as const }]
+          ? [{ device: 'wasm', dtype: 'q4' }]
           : this.#device === 'webgpu'
-            ? [
-                { device: 'webgpu' as const, dtype: 'q4f16' as const },
-                { device: 'webgpu' as const, dtype: 'q4' as const },
-              ]
-            : [
-                { device: 'webgpu' as const, dtype: 'q4f16' as const },
-                { device: 'webgpu' as const, dtype: 'q4' as const },
-                { device: 'wasm' as const, dtype: 'q4' as const },
-              ]
+            ? webgpuAttempts
+            : canUseWebGPU
+              ? [...webgpuAttempts, { device: 'wasm', dtype: 'q4' }]
+              : [{ device: 'wasm', dtype: 'q4' }]
 
       let lastError: unknown
       for (const attempt of attempts) {

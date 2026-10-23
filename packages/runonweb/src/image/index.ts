@@ -70,18 +70,24 @@ function randomSeed(): number {
 
 function mapLoadProgress(onProgress?: ProgressCallback): (status: Record<string, unknown>) => void {
   const parts: Record<string, number> = {}
+  let lastEmit = 0
   return (status) => {
+    if (!onProgress) return
     const component = typeof status.component === 'string' ? status.component : undefined
     const loaded = typeof status.loaded === 'number' ? status.loaded : 0
     const total = typeof status.total === 'number' ? status.total : 0
     if (component && total > 0) parts[component] = loaded / total
+
+    const now = performance.now()
+    if (total > 0 && loaded < total && now - lastEmit < 32) return
+    lastEmit = now
 
     let progress = 0
     for (const [name, weight] of Object.entries(LOAD_WEIGHTS)) {
       progress += (parts[name] ?? 0) * weight
     }
 
-    onProgress?.({
+    onProgress({
       status: component ? `loading ${component}` : 'loading',
       progress: progress * 100,
       file: component,
@@ -137,8 +143,11 @@ export class ImageGenerator {
     if (this.#loading) return this.#loading
 
     this.#loading = (async () => {
-      const { BonsaiImagePipeline } = await import('./engine.js')
-      if (!(await isWebGPUAvailable()) || !(await BonsaiImagePipeline.isSupported())) {
+      const [{ BonsaiImagePipeline }, webgpu] = await Promise.all([
+        import('./engine.js'),
+        isWebGPUAvailable(),
+      ])
+      if (!webgpu || !(await BonsaiImagePipeline.isSupported())) {
         throw new Error('ImageGenerator requires WebGPU. This model has no WASM fallback.')
       }
 

@@ -90,5 +90,9 @@ langSelect?.addEventListener('change', () => { if (selectedFile) void runCaption
 detailSelect?.addEventListener('change', () => { if (selectedFile) void runCaption() })
 bindImagePicker({ dropzone, fileInput, onFile: pick })
 bindSamples(ui, { onFile: pick })
-return () => urls.revokeAll()
+return () => {
+  urls.revokeAll()
+  captioner?.dispose()
+  captioner = null
+}
 })

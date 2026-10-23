@@ -2,6 +2,7 @@ import {
   clearAllModelCache,
   clearModelCache,
   formatBytes,
+  hasCachedModels,
   isWebGPUAvailable,
   listCachedModels,
   storageEstimate,
@@ -124,6 +125,13 @@ void isWebGPUAvailable().then((ok) => {
 })
 
 // Light the dot without opening the panel when something is already cached.
-void listCachedModels().then((models) => {
-  if (dot) dot.hidden = models.length === 0
+const runWhenIdle =
+  typeof requestIdleCallback === 'function'
+    ? (fn: () => void) => requestIdleCallback(fn)
+    : (fn: () => void) => setTimeout(fn, 120)
+
+runWhenIdle(() => {
+  void hasCachedModels().then((hasAny) => {
+    if (dot) dot.hidden = !hasAny
+  })
 })

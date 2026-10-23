@@ -72,6 +72,9 @@ export const TTS_VOICES: readonly TTSVoice[] = [
 ]
 
 /** Languages Supertonic 2 (`multi`) can speak with any of its voices. */
+export const SUPERTONIC_LANGUAGES = ['en', 'ko', 'es', 'pt', 'fr'] as const
+export type SupertonicLanguage = (typeof SUPERTONIC_LANGUAGES)[number]
+
 export const TTS_LANGUAGES = {
   en: 'English',
   ko: 'Korean',

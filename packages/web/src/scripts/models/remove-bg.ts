@@ -100,5 +100,9 @@ ui.initDeviceBadge()
 runBtn?.addEventListener('click', () => void runRemove())
 bindImagePicker({ dropzone, fileInput, onFile: pick })
 bindSamples(ui, { onFile: pick })
-return () => urls.revokeAll()
+return () => {
+  urls.revokeAll()
+  remover?.dispose()
+  remover = null
+}
 })

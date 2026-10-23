@@ -1,5 +1,5 @@
 import type { Device, ProgressCallback, ProgressInfo, ResolvedDevice } from '../core/index.ts'
-import { resolveDevice } from '../core/device.ts'
+import { resolveDevice, takeOrtTurn } from '../core/device.ts'
 import { CACHE_NAME } from '../core/cache.ts'
 import {
   toAnswers,
@@ -291,21 +291,6 @@ function encode(rt: Runtime, record: DecisionRecord): Encoded {
 // ---------------------------------------------------------------------------------------------------------------
 // Inference
 
-/**
- * onnxruntime-web's WebGPU backend keeps a single global OrtRun slot; overlapping runs from any session
- * fail with "Session already started". Every run in this module goes through one queue.
- */
-let ortTurn: Promise<void> = Promise.resolve()
-
-function takeTurn<T>(fn: () => Promise<T>): Promise<T> {
-  const run = ortTurn.then(fn, fn)
-  ortTurn = run.then(
-    () => undefined,
-    () => undefined
-  )
-  return run
-}
-
 function int64(values: ArrayLike<number>, dims: number[], ort: Ort): OrtTensor {
   const data = new BigInt64Array(values.length)
   for (let i = 0; i < values.length; i++) data[i] = BigInt(values[i]!)
@@ -315,12 +300,16 @@ function int64(values: ArrayLike<number>, dims: number[], ort: Ort): OrtTensor {
 /** input_ids, attention_mask and the 3-axis (M-RoPE) position ids for `ids` continuing `start` cached tokens. */
 function tokenFeeds(ort: Ort, ids: number[], start: number): Record<string, OrtTensor> {
   const L = ids.length
-  const pos = new Array<number>(3 * L)
-  for (let a = 0; a < 3; a++) for (let i = 0; i < L; i++) pos[a * L + i] = start + i
+  const mask = new BigInt64Array(start + L).fill(1n)
+  const pos = new BigInt64Array(3 * L)
+  const startBig = BigInt(start)
+  for (let i = 0; i < L; i++) pos[i] = startBig + BigInt(i)
+  pos.copyWithin(L, 0, L)
+  pos.copyWithin(2 * L, 0, L)
   return {
     input_ids: int64(ids, [1, L], ort),
-    attention_mask: int64(new Array<number>(start + L).fill(1), [1, start + L], ort),
-    position_ids: int64(pos, [3, 1, L], ort),
+    attention_mask: new ort.Tensor('int64', mask, [1, start + L]),
+    position_ids: new ort.Tensor('int64', pos, [3, 1, L]),
   }
 }
 
@@ -362,7 +351,7 @@ async function scoreRows(rt: Runtime, enc: Encoded, temperature: number): Promis
     for (const [name, t] of Object.entries(out)) if (name !== 'hidden_states' && !keep?.has(name)) disposeTensor(t)
   }
   try {
-    const stateOut = await takeTurn(() => session.run({ ...tokenFeeds(ort, enc.state, 0), ...rt.empty }))
+    const stateOut = await takeOrtTurn(() => session.run({ ...tokenFeeds(ort, enc.state, 0), ...rt.empty }))
     disposeTensor(stateOut.hidden_states)
     const past: Record<string, OrtTensor> = {}
     for (const [present, pastName] of rt.pastFor) {
@@ -374,7 +363,7 @@ async function scoreRows(rt: Runtime, enc: Encoded, temperature: number): Promis
 
     const probs: Float64Array[] = []
     for (const row of enc.rows) {
-      const out = await takeTurn(() => session.run({ ...tokenFeeds(ort, row.ids, Ls), ...past }))
+      const out = await takeOrtTurn(() => session.run({ ...tokenFeeds(ort, row.ids, Ls), ...past }))
       try {
         const hidden = (await out.hidden_states!.getData()) as Float32Array
         probs.push(readout(rt, hidden, row, temperature))
@@ -399,16 +388,21 @@ function disposeTensor(t: OrtTensor | undefined): void {
 
 async function loadRuntime(base: string, device: ResolvedDevice, onProgress?: ProgressCallback): Promise<Runtime> {
   onProgress?.({ status: 'loading', progress: 0 })
-  const config = (await (await fetchCached(`${base}kev.json`)).json()) as KevConfig
+  const cachePromise = openCache()
+  const transformersPromise = import('@huggingface/transformers')
+  // Preload ORT runtime in parallel with network/cache reads
+  void loadOrt(device).catch(() => undefined)
+
+  const config = (await (await fetchCached(`${base}kev.json`, cachePromise)).json()) as KevConfig
 
   const dataFiles = typeof config.onnx.data === 'string' ? [config.onnx.data] : config.onnx.data
   const files = [config.onnx.model, config.head_file, 'tokenizer.json', 'tokenizer_config.json', ...dataFiles]
   const progress = new ProgressTotals(onProgress)
-  const [model, head, tokenizerJson, tokenizerConfig, ...data] = await Promise.all(
-    files.map((file) => fetchBytes(`${base}${file}`, file, progress))
-  )
+  const [[model, head, tokenizerJson, tokenizerConfig, ...data], { PreTrainedTokenizer }] = await Promise.all([
+    Promise.all(files.map((file) => fetchBytes(`${base}${file}`, file, progress, cachePromise))),
+    transformersPromise,
+  ])
 
-  const { PreTrainedTokenizer } = await import('@huggingface/transformers')
   const text = new TextDecoder()
   const tokenizer = new PreTrainedTokenizer(
     JSON.parse(text.decode(tokenizerJson)),
@@ -510,15 +504,19 @@ class ProgressTotals {
   #loaded = new Map<string, number>()
   #total = new Map<string, number>()
   #cb?: ProgressCallback
+  #lastEmit = 0
 
   constructor(cb?: ProgressCallback) {
     this.#cb = cb
   }
 
-  update(file: string, loaded: number, total: number) {
+  update(file: string, loaded: number, total: number, force = false) {
     this.#loaded.set(file, loaded)
     this.#total.set(file, total)
     if (!this.#cb) return
+    const now = performance.now()
+    if (!force && loaded < total && now - this.#lastEmit < 32) return
+    this.#lastEmit = now
     this.#cb({ status: 'progress', file, loaded, total, progress: total ? (loaded / total) * 100 : undefined })
     let l = 0
     let t = 0
@@ -533,23 +531,28 @@ async function openCache(): Promise<Cache | null> {
   return caches.open(CACHE_NAME).catch(() => null)
 }
 
-async function fetchCached(url: string): Promise<Response> {
-  const cache = await openCache()
+async function fetchCached(url: string, cachePromise: Promise<Cache | null>): Promise<Response> {
+  const cache = await cachePromise
   const hit = await cache?.match(url)
   if (hit) return hit
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Could not load ${url} (${res.status})`)
-  await cache?.put(url, res.clone()).catch(() => undefined)
+  void cache?.put(url, res.clone()).catch(() => undefined)
   return res
 }
 
 /** Download into one buffer with progress, served from and stored in the shared model cache. */
-async function fetchBytes(url: string, file: string, progress: ProgressTotals): Promise<Uint8Array> {
-  const cache = await openCache()
+async function fetchBytes(
+  url: string,
+  file: string,
+  progress: ProgressTotals,
+  cachePromise: Promise<Cache | null>
+): Promise<Uint8Array> {
+  const cache = await cachePromise
   const hit = await cache?.match(url)
   if (hit) {
     const bytes = new Uint8Array(await hit.arrayBuffer())
-    progress.update(file, bytes.byteLength, bytes.byteLength)
+    progress.update(file, bytes.byteLength, bytes.byteLength, true)
     return bytes
   }
 
@@ -577,7 +580,9 @@ async function fetchBytes(url: string, file: string, progress: ProgressTotals): 
     }
     bytes = received === buf.byteLength ? buf : buf.slice(0, received)
   }
-  progress.update(file, bytes.byteLength, bytes.byteLength)
-  await cache?.put(url, new Response(bytes as BodyInit, { headers: { 'content-length': String(bytes.byteLength) } })).catch(() => undefined)
+  progress.update(file, bytes.byteLength, bytes.byteLength, true)
+  void cache
+    ?.put(url, new Response(bytes as BodyInit, { headers: { 'content-length': String(bytes.byteLength) } }))
+    .catch(() => undefined)
   return bytes
 }

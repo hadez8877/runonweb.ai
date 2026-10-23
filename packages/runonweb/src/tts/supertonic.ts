@@ -1,7 +1,8 @@
 import type { Device, ProgressCallback, ResolvedDevice } from '../core/index.ts'
-import { resolveDevice, toProgressInfo } from '../core/index.ts'
+import { SUPERTONIC_CACHE_NAME, resolveDevice, toProgressInfo } from '../core/index.ts'
 import { splitUtterances } from './split.ts'
 import { toFloat32 } from './wav.ts'
+import { SUPERTONIC_LANGUAGES, type SupertonicLanguage } from './voices.ts'
 import type { SpeakChunk } from './types.ts'
 
 /**
@@ -10,10 +11,9 @@ import type { SpeakChunk } from './types.ts'
  */
 const DEFAULT_MODEL = 'onnx-community/Supertonic-TTS-2-ONNX'
 const SAMPLE_RATE = 44_100
-const VOICE_CACHE = 'runonweb-supertonic-voices'
+const VOICE_CACHE = SUPERTONIC_CACHE_NAME
 
-export const SUPERTONIC_LANGUAGES = ['en', 'ko', 'es', 'pt', 'fr'] as const
-export type SupertonicLanguage = (typeof SUPERTONIC_LANGUAGES)[number]
+export { SUPERTONIC_LANGUAGES, type SupertonicLanguage }
 
 type RawAudio = { audio?: Float32Array | number[]; data?: Float32Array | number[]; sampling_rate?: number }
 
@@ -36,10 +36,12 @@ export async function loadSupertonic(options: {
   device?: Device
   onProgress?: ProgressCallback
 }): Promise<LoadedSupertonic> {
-  const device = await resolveDevice(options.device ?? 'auto')
   options.onProgress?.({ status: 'loading', progress: 0 })
 
-  const { pipeline, env } = await import('@huggingface/transformers')
+  const [device, { pipeline, env }] = await Promise.all([
+    resolveDevice(options.device ?? 'auto'),
+    import('@huggingface/transformers'),
+  ])
   env.allowLocalModels = false
   const modelId = options.model ?? DEFAULT_MODEL
 
@@ -111,11 +113,17 @@ async function fetchVoice(modelId: string, file: string): Promise<Float32Array> 
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Voice "${file}" not found (${res.status})`)
   const buffer = await res.arrayBuffer()
-  try {
-    await cache?.put(url, new Response(buffer.slice(0), { headers: { 'content-type': 'application/octet-stream' } }))
-  } catch {
-    // Cache is best-effort.
-  }
+  void cache
+    ?.put(
+      url,
+      new Response(buffer, {
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(buffer.byteLength),
+        },
+      })
+    )
+    .catch(() => undefined)
   return new Float32Array(buffer)
 }
 

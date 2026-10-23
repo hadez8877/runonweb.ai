@@ -1,5 +1,4 @@
 import type { Device, ProgressCallback, ProgressInfo } from '../core/index.ts'
-import { loadPipeline } from '../core/pipeline.ts'
 import { BergamotEngine, DEFAULT_MODEL_PATH, hasPair, resolveRoute, type Route } from './bergamot.ts'
 import { PAIRS, RUNTIME_CDN, RUNTIME_VERSION, type Architecture, type PairEntry } from './registry.ts'
 
@@ -132,6 +131,7 @@ export class Translator {
   }
 
   async #loadTransformers(model: string): Promise<void> {
+    const { loadPipeline } = await import('../core/pipeline.ts')
     const { pipe, device } = await loadPipeline({
       task: 'translation',
       model,

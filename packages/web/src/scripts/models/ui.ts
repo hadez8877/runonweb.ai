@@ -104,21 +104,35 @@ export function createDemoUI(prefix: string): DemoUI {
     speed: 0,
   }
 
+  let lastStatusText = ''
+  let lastSpeedText = ''
+  let lastProgressUpdate = 0
+
   const setSpeed = (bytesPerSec: number | null) => {
     if (!speedEl) return
     if (bytesPerSec == null || bytesPerSec < 1) {
-      speedEl.hidden = true
-      speedEl.textContent = ''
+      if (!speedEl.hidden) {
+        speedEl.hidden = true
+        speedEl.textContent = ''
+        lastSpeedText = ''
+      }
       return
     }
-    speedEl.hidden = false
-    speedEl.textContent = `${formatBytes(bytesPerSec)}/s`
+    const nextText = `${formatBytes(bytesPerSec)}/s`
+    if (speedEl.hidden) speedEl.hidden = false
+    if (nextText !== lastSpeedText) {
+      lastSpeedText = nextText
+      speedEl.textContent = nextText
+    }
   }
 
   const ui: DemoUI = {
     el,
     setStatus(text) {
-      if (statusEl) statusEl.textContent = text
+      if (statusEl && text !== lastStatusText) {
+        lastStatusText = text
+        statusEl.textContent = text
+      }
     },
     setError(message) {
       if (!errorEl) return
@@ -131,28 +145,35 @@ export function createDemoUI(prefix: string): DemoUI {
         if (progressEl) progressEl.hidden = true
         setSpeed(null)
         resetSpeed(speedState)
+        lastProgressUpdate = 0
         return
       }
-      if (progressRow) progressRow.hidden = false
+      if (progressRow && progressRow.hidden) progressRow.hidden = false
       if (!progressEl) return
-      progressEl.hidden = false
+      if (progressEl.hidden) progressEl.hidden = false
       progressEl.value = Math.max(0, Math.min(100, value))
     },
     setDevice(text) {
       if (deviceEl) deviceEl.textContent = text
     },
     onProgress(info) {
+      const now = performance.now()
       if (info.status === 'loading' && (info.progress ?? 0) === 0 && info.loaded == null) {
         resetSpeed(speedState)
         setSpeed(null)
+        lastProgressUpdate = 0
       }
-      const bytesPerSec = noteDownloadSpeed(speedState, info, performance.now())
+      const bytesPerSec = noteDownloadSpeed(speedState, info, now)
       if (typeof info.progress === 'number') {
+        const isComplete = info.progress >= 100 || info.status === 'ready' || info.status === 'done'
+        if (!isComplete && now - lastProgressUpdate < 40) return
+        lastProgressUpdate = now
+        const rounded = Math.round(info.progress)
         ui.setProgress(info.progress)
-        ui.setStatus(`${info.status}${info.file ? `: ${info.file}` : ''} (${Math.round(info.progress)}%)`)
+        ui.setStatus(`${info.status}${info.file ? `: ${info.file}` : ''} (${rounded}%)`)
         setSpeed(bytesPerSec)
         if (progressEl && bytesPerSec != null && bytesPerSec >= 1) {
-          progressEl.setAttribute('aria-valuetext', `${Math.round(info.progress)}%, ${formatBytes(bytesPerSec)}/s`)
+          progressEl.setAttribute('aria-valuetext', `${rounded}%, ${formatBytes(bytesPerSec)}/s`)
         }
       } else {
         ui.setStatus(info.status)
