@@ -100,6 +100,21 @@ const first = models[0]!
     font-family: var(--font-mono);
     font-size: 13px;
     line-height: 1.7;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--color-fg-3) 65%, transparent) transparent;
+  }
+  .hero-code-slide :global(pre::-webkit-scrollbar) {
+    height: 6px;
+  }
+  .hero-code-slide :global(pre::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+  .hero-code-slide :global(pre::-webkit-scrollbar-thumb) {
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--color-fg-3) 65%, transparent);
+  }
+  .hero-code-slide :global(pre::-webkit-scrollbar-thumb:hover) {
+    background: var(--color-fg-3);
   }
   .hero-code-slide :global(code) {
     font-family: inherit;
