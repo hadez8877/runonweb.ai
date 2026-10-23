@@ -60,19 +60,6 @@ Sizes are approximate. The catalog (names, colors, base model, license) lives in
 - On a laptop GPU, WebGPU fp16 is 5–7× faster than WASM q8 for vision models.
 - The default `onnxruntime-web` entry is the JSEP build: its `MatMulNBits` only runs 2/4-bit weights, so 8-bit layers fail at session creation (`nbits_ == 4 || nbits_ == 2 was false`). `onnxruntime-web/webgpu` (the native WebGPU EP, also what Transformers.js uses) runs them, but its CPU side has no `GatherBlockQuantized` (int4 embeddings), so the WASM fallback must load `onnxruntime-web/wasm`. `runonweb/classify` picks the entry per backend.
 
-## Site
-
-| Path | Description |
-|------|-------------|
-| `/` | Landing + catalog |
-| `/models` | All models grouped by input |
-| `/models/<slug>` | Model page: hero, live demo, code, specs, FAQ (`stt`, `remove-bg`, `caption`, `depth`, `detect`, `embed`, `classify`, `translate`, `emoji`, `tts`) |
-| `/docs` | Install, the shared pattern, API for every module |
-
-Sample media for the one-click demos lives in `packages/web/public/samples/` (images and speech clips taken from the Transformers.js docs dataset `Xenova/transformers.js-docs`; no explicit license is published there, so replace them with owned or CC0 media before a public launch). Sample definitions are the `samples` field in `packages/web/src/data/models.ts`.
-
-Design: dark "instrument panel". Geist for headings and body, Geist Mono for code, **Geist Pixel as the machine voice** (readouts: sizes, timings, backends, section numbers, status bars). Accent is phosphor amber (#ffb340). One hue per model used for LEDs and a hand-drawn 12×8 pixel icon per task (`icon` rows in `models.ts`, rendered by `PixelIcon.astro`). Favicon set is generated from the logo (`packages/web/public/favicon.svg`, PNGs via sharp). The landing hero is an ordered-dither field computed by the page every frame (`packages/web/src/scripts/hero-dither.ts`). Bench numbers in `models.ts` are measured, not estimated.
-
 ## Adding a module
 
 1. Create `packages/runonweb/src/<name>/index.ts` using `loadPipeline` from `core/pipeline.ts`. Pick an explicit `dtype` per device and comment the resulting download size.
