@@ -38,11 +38,14 @@ Ask for explicit confirmation before pushing, publishing to npm, or creating the
    gh auth status
    ```
 
-4. After confirmation, run the following from `packages/runonweb` in the same shell. Replace `patch` with the bump selected above. `npm version` creates the version commit and tag.
+4. After confirmation, run the following from `packages/runonweb` in the same shell. Replace `patch` with the bump selected above. Create the version commit and tag explicitly because `npm version` does not reliably create them from this subdirectory.
 
    ```
-   npm version patch
+   npm version patch --no-git-tag-version
    VERSION="v$(node -p 'require("./package.json").version')"
+   git add package.json
+   git commit -m "chore(release): $VERSION"
+   git tag -a "$VERSION" -m "runonweb $VERSION"
    git push origin main
    git push origin "$VERSION"
    npm publish --access public
