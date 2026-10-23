@@ -14,6 +14,7 @@
     "deploy": "pnpm --filter web run deploy",
     "check": "pnpm --filter web run check",
     "models:translate": "node scripts/translate-models.mjs fetch",
-    "models:translate:registry": "node scripts/translate-models.mjs registry"
+    "models:translate:registry": "node scripts/translate-models.mjs registry",
+    "models:sizes": "node scripts/model-sizes.mjs"
   }
 }
