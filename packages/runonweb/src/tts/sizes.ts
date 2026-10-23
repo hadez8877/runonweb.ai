@@ -15,14 +15,14 @@ export const TTS_SIZES: Record<
     label: 'Small',
     engine: 'Kokoro 82M',
     params: '82M',
-    downloadMB: '~326 MB · WASM ~92 MB',
+    downloadMB: '~326 MB · WASM ~93 MB',
     quality: 'English · Spanish · French',
   },
   multi: {
     label: 'Multi',
     engine: 'Supertonic 2',
     params: '66M',
-    downloadMB: '~262 MB',
+    downloadMB: '~263 MB',
     quality: 'en · ko · es · pt · fr · 44.1 kHz',
   },
 }

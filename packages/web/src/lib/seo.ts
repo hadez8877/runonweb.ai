@@ -41,7 +41,7 @@ const MODEL_SEO: Record<string, { title: string; description: string }> = {
   embed: {
     title: 'Text embeddings in the browser: MiniLM on WebGPU',
     description:
-      'Create 384-dimension sentence embeddings for semantic search in your browser with all-MiniLM-L6-v2. ~23 MB, free, no text sent anywhere.',
+      'Create 384-dimension sentence embeddings for semantic search in your browser with all-MiniLM-L6-v2. ~24 MB, free, no text sent anywhere.',
   },
   classify: {
     title: 'Zero-shot text classification in the browser',
