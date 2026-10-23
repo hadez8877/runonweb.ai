@@ -84,10 +84,12 @@ const tabs = await Promise.all(commands.map(async (c) => ({ ...c, html: await hi
   .hero-install-cmd :global(pre) {
     margin: 0;
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     background: transparent !important;
     font-family: var(--font-mono);
     font-size: var(--cmd-size);
-    line-height: 1.2;
+    line-height: 1.35;
     white-space: nowrap;
   }
   .hero-install-cmd :global(code) {
