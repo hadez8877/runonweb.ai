@@ -135,5 +135,8 @@
     "image-generation",
     "text-to-image",
     "bonsai"
-  ]
+  ],
+  "publishConfig": {
+    "provenance": true
+  }
 }
