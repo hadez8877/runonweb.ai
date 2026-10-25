@@ -1,12 +1,13 @@
 {
-  "name": "runonweb-ai",
+  "name": "root",
   "type": "module",
-  "version": "0.0.1",
+  "version": "0.0.0",
   "private": true,
   "engines": {
     "node": ">=24"
   },
   "scripts": {
+    "release": "changeset publish",
     "dev": "pnpm --filter web run dev",
     "build": "pnpm --filter web run build",
     "preview": "pnpm --filter web run preview",
@@ -15,6 +16,13 @@
     "check": "pnpm --filter web run check",
     "models:translate": "node scripts/translate-models.mjs fetch",
     "models:translate:registry": "node scripts/translate-models.mjs registry",
-    "models:sizes": "node scripts/model-sizes.mjs"
+    "models:sizes": "node scripts/model-sizes.mjs",
+    "version": "changeset version && pnpm install --no-frozen-lockfile"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^1.0.1",
+    "@changesets/cli": "^3.0.3",
+    "@types/node": "^24.1.0",
+    "typescript": "~6.0.3"
   }
 }
